@@ -113,7 +113,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-
       - name: 🐳 Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -164,22 +163,35 @@ jobs:
           cache-to: type=gha,mode=max
 
   notify:
-    name: 📢 Slack Notification
+    name: 📧 Email Notification
     needs: [test, build, security, push]
-    if: always()
+    if: always()          # همیشه اجرا شود (موفق یا شکست)
     runs-on: ubuntu-latest
 
     steps:
-      - name: Slack Notification
-        uses: rtCamp/action-slack-notify@v2
-        env:
-          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
-          SLACK_COLOR: ${{ contains(needs.*.result, 'failure') && 'danger' || 'good' }}
-          SLACK_TITLE: "FastAPI CI/CD Pipeline"
-          SLACK_MESSAGE: |
-            *Repository:* ${{ github.repository }}
-            *Branch:* ${{ github.ref_name }}
-            *Commit:* ${{ github.sha }}
-            *Status:* ${{ contains(needs.*.result, 'failure') && '❌ Failed' || '✅ Success' }}
-            *Actor:* ${{ github.actor }}
-            *Run URL:* ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      - name: Send Email Notification
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: zandinezhadabolfazl@gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.EMAIL_USERNAME }}
+          password: ${{ secrets.EMAIL_PASSWORD }}
+          subject: |
+            ${{ contains(needs.*.result, 'failure') && '❌' || '✅' }} FastAPI CI/CD - ${{ github.repository }}
+          to: ${{ secrets.EMAIL_TO }}
+          from: FastAPI CI/CD <${{ secrets.EMAIL_USERNAME }}>
+          body: |
+            سلام،
+
+            اجرای Pipeline به پایان رسید.
+
+            وضعیت: ${{ contains(needs.*.result, 'failure') && '❌ شکست خورد' || '✅ با موفقیت انجام شد' }}
+
+            Repository : ${{ github.repository }}
+            Branch     : ${{ github.ref_name }}
+            Commit     : ${{ github.sha }}
+            Actor      : ${{ github.actor }}
+            Run URL    : ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            تاریخ: ${{ github.event.head_commit.timestamp }}
