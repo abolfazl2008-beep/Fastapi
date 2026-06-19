@@ -1,40 +1,53 @@
+name: 🚀 FastAPI Production CI/CD
 
-name: 🚀 FastAPI CI/CD Pipeline
 on:
   push:
-    branches:
-      - main
+    branches: [ main, develop ]
   pull_request:
-    branches:
-      - main
+    branches: [ main, develop ]
 
 permissions:
   contents: read
+  packages: write
 
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  PYTHON_VERSION: "3.11"
+  IMAGE_NAME: fastapi-app
+
 jobs:
   test:
     name: 🧪 Test & Quality Check
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
-    strategy:
-      fail-fast: true
-      matrix:
-        python-version: ["3.11"]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: testdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
 
     steps:
-      - name: 📥 Checkout Repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: 🐍 Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
+          cache-dependency-path: requirements.txt
 
       - name: 📦 Install Dependencies
         run: |
@@ -42,106 +55,131 @@ jobs:
           pip install -r requirements.txt
           pip install pytest pytest-cov ruff black isort bandit
 
-      - name: 🔍 Ruff Lint
-        run: ruff check .
+      - name: 🔍 Lint & Format
+        run: |
+          ruff check .
+          black --check .
+          isort . --check-only
 
-      - name: 🎨 Black Format Check
-        run: black --check .
-
-      - name: 📚 Import Order Check
-        run: isort . --check-only
-
-      - name: 🔒 Security Scan
-        run: bandit -r app -ll
+      - name: 🔒 Bandit Security Scan
+        run: bandit -r app -l
 
       - name: 🧪 Run Tests
+        env:
+          DATABASE_URL: postgresql://test:test@localhost:5432/testdb
         run: |
-          pytest \
-          --cov=app \
-          --cov-report=term-missing \
-          --cov-report=xml
+          pytest -v --cov=app --cov-report=xml --cov-report=term-missing
 
-      - name: 📊 Upload Coverage Report
-        uses: actions/upload-artifact@v4
+      - name: 📊 Upload Coverage
         if: always()
+        uses: actions/upload-artifact@v4
         with:
           name: coverage-report
           path: coverage.xml
 
   build:
-    name: 🏗️ Build Verification
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    name: 🏗️ Build Docker Image
     needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
-      - name: 📥 Checkout Repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: 🐍 Setup Python
-        uses: actions/setup-python@v5
+      - name: 🐳 Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 🔨 Build Docker Image
+        uses: docker/build-push-action@v6
         with:
-          python-version: "3.11"
-          cache: pip
+          context: .
+          push: false
+          load: true
+          tags: fastapi-app:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-      - name: 📦 Install Dependencies
+      - name: ✅ Verify Container
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          docker run -d --name fastapi-test -p 8000:8000 fastapi-app:latest
+          sleep 10
+          curl -f http://localhost:8000/docs || exit 1
+          docker stop fastapi-test && docker rm fastapi-test
 
-      - name: ✅ Verify Application Import
-        run: |
-          python -c "import main; print('Application imported successfully.')"
+  security:
+    name: 🔐 Trivy Security Scan
+    needs: build
+    runs-on: ubuntu-latest
 
-      - name: 📦 Verify Project Compiles
-        run: |
-          python -m compileall .
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 🐳 Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Image for Scan
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: fastapi-app:latest
+
+      - name: 🔍 Trivy Scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: fastapi-app:latest
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: 1
+          ignore-unfixed: true
+
+  push:
+    name: 📤 Push to Docker Hub
+    needs: [security]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 🐳 Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 🔑 Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: 🚀 Build & Push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/fastapi:${{ github.sha }}
+            ${{ secrets.DOCKER_USERNAME }}/fastapi:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
   notify:
-    name: 📧 Email Notification
+    name: 📢 Slack Notification
+    needs: [test, build, security, push]
+    if: always()
     runs-on: ubuntu-latest
 
-    needs:
-      - test
-      - build
-
-    if: failure()
-
     steps:
-      - name: 📧 Send Failure Email
-        uses: dawidd6/action-send-mail@v3
-        with:
-          server_address: smtp.gmail.com
-          server_port: 465
-          secure: true
-
-          username: ${{ secrets.EMAIL_USERNAME }}
-          password: ${{ secrets.EMAIL_PASSWORD }}
-
-          subject: "❌ FastAPI CI Failed - ${{ github.repository }}"
-
-          to: ${{ secrets.EMAIL_TO }}
-
-          from: ${{ secrets.EMAIL_USERNAME }}
-
-          body: |
-            سلام،
-
-            اجرای Pipeline پروژه با خطا مواجه شد.
-
-            =======================================
-            Repository : ${{ github.repository }}
-            Branch     : ${{ github.ref_name }}
-            Commit     : ${{ github.sha }}
-            Triggered  : ${{ github.actor }}
-            Workflow   : ${{ github.workflow }}
-            Run Number : ${{ github.run_number }}
-            =======================================
-
-            مشاهده لاگ:
-
-            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-
-            ---
-            GitHub Actions
-
+      - name: Slack Notification
+        uses: rtCamp/action-slack-notify@v2
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+          SLACK_COLOR: ${{ contains(needs.*.result, 'failure') && 'danger' || 'good' }}
+          SLACK_TITLE: "FastAPI CI/CD Pipeline"
+          SLACK_MESSAGE: |
+            *Repository:* ${{ github.repository }}
+            *Branch:* ${{ github.ref_name }}
+            *Commit:* ${{ github.sha }}
+            *Status:* ${{ contains(needs.*.result, 'failure') && '❌ Failed' || '✅ Success' }}
+            *Actor:* ${{ github.actor }}
+            *Run URL:* ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
